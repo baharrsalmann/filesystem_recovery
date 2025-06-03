@@ -1,0 +1,12 @@
+- 2:root/
+-- 11:lost+found/
+-- 13:home/
+--- 15:user1/
+---- 22:file1.txt
+---- 20:file2.txt
+---- (19:file1.txt)
+--- 21:user2/
+---- 19:file4.txt
+--- (16:user3/)
+-- 12:etc/
+--- 14:config.txt
