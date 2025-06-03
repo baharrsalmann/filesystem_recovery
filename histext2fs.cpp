@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <set>
 #include "ext2fs.h"
+#include "ext2fs_print.h"
 using namespace std;
 
 struct GhostEntry {
@@ -129,7 +130,8 @@ private:
     uint32_t calculateEntrySize(uint8_t name_length) {
         // 8 bytes for the fixed part + name length, aligned to 4-byte boundary
         uint32_t size = 8 + name_length;
-        return (size + 3) & ~3; // Round up to next 4-byte boundary
+        uint32_t result = (size + 3) & ~3;
+        return result; // Round up to next 4-byte boundary
     }
     
     // Function to find ghost entries in the unused space after a directory entry
@@ -148,20 +150,42 @@ private:
                 potential_entry->name_length > 255 ||
                 potential_entry->length == 0 ||
                 offset + potential_entry->name_length + 8 > start_offset + available_space) {
+               
                 offset += 4; // Try next 4-byte aligned position
                 continue;
             } 
-            GhostEntry ghost;
-            ghost.inode = potential_entry->inode;
-            ghost.name =string(potential_entry->name, potential_entry->name_length);
-            ghost.file_type = potential_entry->file_type;
-            if (ghost.name != "." && ghost.name != "..") {
-                ghosts.push_back(ghost);
+             //std::cout<<"name is:"<<std::string(potential_entry->name, potential_entry->name_length)<<endl;           
+            // Additional validation: check if this looks like a real entry
+            bool looks_valid = true;
+            //NEED OR NOTTTTTT????
+            // Check if name contains reasonable characters
+            for (int i = 0; i < potential_entry->name_length; i++) {
+                char c = potential_entry->name[i];
+                if (c == 0 || (c < 32 && c != 0) || c > 126) {
+                    //looks_valid = false;
+                    break;
+                }
             }
-            // Move to next potential entry
-            uint32_t entry_size = calculateEntrySize(potential_entry->name_length);
-            offset += entry_size;
+            
+            if (looks_valid) {
+                GhostEntry ghost;
+                ghost.inode = potential_entry->inode;
+                ghost.name = std::string(potential_entry->name, potential_entry->name_length);
+                ghost.file_type = potential_entry->file_type;
+                
+                // Skip . and .. entries
+                if (ghost.name != "." && ghost.name != "..") {
+                    ghosts.push_back(ghost);
+                }
+                
+                // Move to next potential entry
+                uint32_t entry_size = calculateEntrySize(potential_entry->name_length);
+                offset += entry_size;
+            } else {
+                offset += 4; // Try next 4-byte aligned position
+            }
         }
+        
         return ghosts;
     }
     
@@ -194,6 +218,7 @@ private:
         // Handle single indirect block if present
         if (inode.single_indirect != 0) {
             try {
+                cout<<"single ind"<<endl;
                 auto indirect_block = readBlock(inode.single_indirect);
                 uint32_t* block_pointers = reinterpret_cast<uint32_t*>(indirect_block.data());
                 uint32_t pointers_per_block = block_size / sizeof(uint32_t);
@@ -207,10 +232,10 @@ private:
             }
         }
         if(inode.double_indirect != 0){
-
+            cout<<"double ind"<<endl;
         }
         if(inode.triple_indirect != 0){
-
+            cout<<"triple ind"<<endl;
         }
     }
     
@@ -225,7 +250,6 @@ private:
         while (offset < block_size) {
             const ext2_dir_entry* entry = 
                 reinterpret_cast<const ext2_dir_entry*>(block_buffer.data() + offset);
-            
             if (entry->length == 0) {
                 break;
             }
@@ -233,7 +257,8 @@ private:
             if (entry->inode != 0) {
                 // Extract and null-terminate the name
                 string name(entry->name, entry->name_length);
-                
+                //cout<<"the name is:" <<name<<endl;
+
                 // Skip . and .. entries for active processing
                 if (name != "." && name != ".." ) {
                     active_inodes.insert(entry->inode);
@@ -252,7 +277,8 @@ private:
             if (entry->length > actual_size) {
                 uint32_t unused_space = entry->length - actual_size;
                 auto ghosts = findGhostEntries(block_buffer, offset + actual_size, unused_space);
-                // Filter out ghosts that are actually active entries
+                string name(entry->name, entry->name_length);
+                // Filter out ghosts that are actually active entries  //NEDEENNN AYNI DİR İCİNDEYİZ DİYE Mİ?
                 for (const auto& ghost : ghosts) {
                     if (active_inodes.find(ghost.inode) == active_inodes.end()) {
                         all_ghosts.push_back(ghost);
@@ -289,51 +315,7 @@ private:
             }
         }
 }
-
-void printAction(const Action& act) {
-    std::cout << act.timestamp << " " << act.action << " [";
-    for (size_t i = 0; i < act.args.size(); ++i) {
-        if (i > 0) std::cout << " ";
-        std::cout << act.args[i];
-    }
-    std::cout << "] [";
-    for (size_t i = 0; i < act.affected_dirs.size(); ++i) {
-        if (i > 0) std::cout << " ";
-        std::cout << act.affected_dirs[i];
-    }
-    std::cout << "] [";
-    for (size_t i = 0; i < act.affected_inodes.size(); ++i) {
-        if (i > 0) std::cout << " ";
-        std::cout << act.affected_inodes[i];
-    }
-    std::cout << "]\n";
-} /*
-void Ext2FileSystem::revealActions(const vector<std::pair<std::string, uint32_t>> active_entries,
-                                   const vector<GhostEntry> all_ghosts,
-                                   const std::map<uint32_t, ext2_inode>& inode_map) {
-    // Case 1: Live files that were created directly (touch or mkdir)
-    for (auto& [name, inode_num] : active_entries) {
-        ext2_inode inode = readInode(inode_num); 
-        if (inode.deletion_time == 0 &&
-            inode.change_time == inode.modification_time &&
-            inode.access_time == inode.change_time) {
-            Action act;
-            act.timestamp = inode.access_time;
-            //if((inode.mode & EXT2_I_DTYPE)) {act.action = "mkdir";} else {act.action="touch"};
-            //act.args.push_back(name);
-            //act.affected_dirs.push_back(readInode(getInode(getParentPath(path))).inode);
-           //act.affected_inodes.push_back(inode_num);
-            //printAction(act);
-
-            //handled.insert(inode);
-        }
-    }             
-}                                
-   */                             
-                                
-                                
-
-
+                       
 
 };   
 
