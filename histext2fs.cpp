@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <map>
 #include <set>
 #include "ext2fs.h"
 #include "ext2fs_print.h"
@@ -14,6 +15,18 @@ struct GhostEntry {
     uint32_t inode;
     string name;
     uint8_t file_type;
+};
+
+struct EntryRecord {
+    string full_path;
+    string name;
+    uint32_t parent_inode;
+    bool is_ghost;
+};
+
+struct InodeRecord {
+    ext2_inode inode_data;
+    vector<EntryRecord> entries;
 };
 
 struct Action {
@@ -31,6 +44,7 @@ private:
     vector<ext2_block_group_descriptor> bgd_table;
     uint32_t block_size;
     uint32_t num_block_groups;
+    map<uint32_t, InodeRecord> inode_to_info;
 
 public:
     explicit Ext2FileSystem(const std::string& filename) {
@@ -38,7 +52,6 @@ public:
         if (!fs_file.is_open()) {
             throw std::runtime_error("Failed to open filesystem image: " + filename);
         }
-        
         readSuperBlock();
         readBGDTable();
     }
@@ -51,7 +64,10 @@ public:
     
     void displayDirectoryTree() {
         std::cout << "\n=== Current Directory Structure (with Ghost Entries) ===\n";
-        traverseDirectory(EXT2_ROOT_INODE, 1, "", "root");
+        traverseDirectory(EXT2_ROOT_INODE, 1, "", "root", false);
+    }
+    void recovery(){
+        printRecoveredActions();
     }
 
 private:
@@ -189,18 +205,27 @@ private:
         return ghosts;
     }
     
-    void traverseDirectory(uint32_t inode_num, int depth, const std::string& current_path, const std::string& dir_name = "") {
+    // Modified traverseDirectory to handle ghost directories
+    void traverseDirectory(uint32_t inode_num, int depth, const std::string& current_path, 
+                          const std::string& dir_name = "", bool is_ghost = false) {
         ext2_inode inode = readInode(inode_num); 
+        
         // Check if this is a directory
-        if (!(inode.mode & EXT2_I_DTYPE)) {return;}
+        if (!(inode.mode & EXT2_I_DTYPE)) {
+            return;
+        }
 
-        // Print current directory witsh proper indentation
+        // Print current directory with proper indentation
         if (!dir_name.empty() || depth == 1) {
             std::string indent(depth, '-');
             if (depth == 1) {
                 cout << indent << " " << inode_num << ":root/\n";
             } else {
-                cout << indent << " " << inode_num << ":" << dir_name << "/\n";
+                if (is_ghost) {
+                    cout << indent << " (" << inode_num << ":" << dir_name << "/)\n";
+                } else {
+                    cout << indent << " " << inode_num << ":" << dir_name << "/\n";
+                }
             }
         }
         
@@ -208,13 +233,13 @@ private:
         for (int i = 0; i < EXT2_NUM_DIRECT_BLOCKS && inode.direct_blocks[i] != 0; i++) {
             try {
                 auto block_buffer = readBlock(inode.direct_blocks[i]);
-                processDirectoryBlockWithGhosts(block_buffer, depth + 1, current_path);
+                processDirectoryBlockWithGhosts(block_buffer, depth + 1, current_path,inode_num, is_ghost);
             } catch (const std::exception& e) {
                 std::cerr << "Error reading directory block: " << e.what() << "\n";
                 continue;
             }
         }
-        //BURAYA BAK HARD LİNKKLEERRR??
+        
         // Handle single indirect block if present
         if (inode.single_indirect != 0) {
             try {
@@ -225,12 +250,13 @@ private:
                 
                 for (uint32_t i = 0; i < pointers_per_block && block_pointers[i] != 0; i++) {
                     auto block_buffer = readBlock(block_pointers[i]);
-                    processDirectoryBlockWithGhosts(block_buffer, depth + 1, current_path);
+                    processDirectoryBlockWithGhosts(block_buffer, depth + 1, current_path,inode_num, is_ghost);
                 }
             } catch (const std::exception& e) {
                 std::cerr << "Error reading indirect directory block: " << e.what() << "\n";
             }
         }
+        
         if(inode.double_indirect != 0){
             cout<<"double ind"<<endl;
         }
@@ -239,88 +265,145 @@ private:
         }
     }
     
-    void processDirectoryBlockWithGhosts(const std::vector<char>& block_buffer, int depth, const std::string& current_path) {
+    // Modified processDirectoryBlockWithGhosts to traverse ghost directories
+    void processDirectoryBlockWithGhosts(const std::vector<char>& block_buffer, int depth, 
+                                        const std::string& current_path,uint32_t dir_inode, bool parent_is_ghost = false) {
         uint32_t offset = 0;
-        std::set<uint32_t> active_inodes; // Track active inodes to avoid duplicate ghosts
-        
-        // First pass: process active entries and collect ghost entries
+        std::set<uint32_t> active_inodes;
         vector<std::pair<std::string, uint32_t>> active_entries;
         vector<GhostEntry> all_ghosts;
         
+        // Reset offset for actual processing
+        offset = 0;                                    
         while (offset < block_size) {
             const ext2_dir_entry* entry = 
                 reinterpret_cast<const ext2_dir_entry*>(block_buffer.data() + offset);
-            if (entry->length == 0) {
-                break;
-            }
-            
+            if (entry->length == 0) break;
             if (entry->inode != 0) {
-                // Extract and null-terminate the name
                 string name(entry->name, entry->name_length);
-                //cout<<"the name is:" <<name<<endl;
-
-                // Skip . and .. entries for active processing
-                if (name != "." && name != ".." ) {
+                if (name != "." && name != "..") {
                     active_inodes.insert(entry->inode);
-                    
+                    ext2_inode inode_data = readInode(entry->inode);
+                    string full_path = current_path.empty() ? name : current_path + "/" + name;
+
+                    if (inode_to_info.find(entry->inode) == inode_to_info.end()) {
+                        inode_to_info[entry->inode].inode_data = inode_data;
+                    }
+                    inode_to_info[entry->inode].entries.push_back({"/"+full_path, name, dir_inode, false});
+
                     if (entry->file_type == EXT2_D_DTYPE) {
                         active_entries.push_back({name + "/", entry->inode});
-                        //live_paths.push_back()
                     } else {
                         active_entries.push_back({name, entry->inode});
                     }
                 }
             }
-            
-            // Check for ghost entries in the unused space of this entry
+
             uint32_t actual_size = calculateEntrySize(entry->name_length);
             if (entry->length > actual_size) {
                 uint32_t unused_space = entry->length - actual_size;
                 auto ghosts = findGhostEntries(block_buffer, offset + actual_size, unused_space);
-                string name(entry->name, entry->name_length);
-                // Filter out ghosts that are actually active entries  //NEDEENNN AYNI DİR İCİNDEYİZ DİYE Mİ?
                 for (const auto& ghost : ghosts) {
                     if (active_inodes.find(ghost.inode) == active_inodes.end()) {
                         all_ghosts.push_back(ghost);
+                        ext2_inode inode_data = readInode(ghost.inode);
+                        string full_path = current_path.empty() ? ghost.name : current_path + "/" + ghost.name;
+
+                        if (inode_to_info.find(ghost.inode) == inode_to_info.end()) {
+                            inode_to_info[ghost.inode].inode_data = inode_data;
+                        }
+                        //cout<<(parent_inode)<<"  "<<current_path;
+                        inode_to_info[ghost.inode].entries.push_back({"/"+full_path, ghost.name, dir_inode, true});
                     }
                 }
-            
             }
-        offset += entry->length;
+            offset += entry->length;
         }
-        // Print active entries
+
         for (const auto& [name, inode] : active_entries) {
             string indent(depth, '-');
-            
-            if ((name.back() == '/')) {
-                // Directory entry
+            if (name.back() == '/') {
                 string dir_name = name.substr(0, name.length() - 1);
                 string new_path = current_path.empty() ? dir_name : current_path + "/" + dir_name;
-                traverseDirectory(inode, depth, new_path, dir_name);
+                traverseDirectory(inode, depth, new_path, dir_name, parent_is_ghost);
             } else {
-                // Regular file entry
-                std::cout << indent << " " << inode << ":" << name << "\n";
+                if (parent_is_ghost) {
+                    std::cout << indent << " (" << inode << ":" << name << ")\n";
+                } else {
+                    std::cout << indent << " " << inode << ":" << name << "\n";
+                }
             }
         }
-        
-        // Print ghost entries (in parentheses)
+
         for (const auto& ghost : all_ghosts) {
             std::string indent(depth, '-');
             if (ghost.file_type == EXT2_D_DTYPE) {
-                // Ghost directory - don't traverse its contents as per requirement
-                std::cout << indent << " (" << ghost.inode << ":" << ghost.name << "/)\n";
+                string new_path = current_path.empty() ? ghost.name : current_path + "/" + ghost.name;
+                traverseDirectory(ghost.inode, depth, new_path, ghost.name, true);
             } else {
-                // Ghost file
                 std::cout << indent << " (" << ghost.inode << ":" << ghost.name << ")\n";
             }
         }
-}
-                       
+    }
+        const auto& getInodeEntryMap() const { return inode_to_info; }
 
+    void printRecoveredActions() const {
+        for (const auto& [inode, record] : inode_to_info) {
+            size_t live_count = 0, ghost_count = 0;
+            //string path = "";
+            //uint32_t parent = 0;
+            for (const auto& e : record.entries) {
+                if (e.is_ghost) ghost_count++;
+                else {
+                    live_count++;
+                    //path = e.full_path;
+                    //parent = e.parent_inode;
+                }
+            }
+
+            const auto& inode_data = record.inode_data;
+            Action action;
+            if (ghost_count == 0) {
+                // mkdir or touch
+                action.timestamp = inode_data.access_time;
+                action.action = (inode_data.mode & EXT2_I_DTYPE) ? "mkdir" : "touch";
+                action.args = {record.entries[0].full_path };
+                action.affected_dirs = { record.entries[0].parent_inode };
+                action.affected_inodes = { inode };
+            }   else if ( ghost_count == 1) {
+                // mkdir or touch
+                action.timestamp = inode_data.access_time;
+                action.action = (inode_data.mode & EXT2_I_DTYPE) ? "mkdir" : "touch";
+                if(record.entries[0].is_ghost) {action.args = {record.entries[0].full_path}; action.affected_dirs={record.entries[0].parent_inode}; }
+                else  {action.args = {record.entries[1].full_path}; action.affected_dirs={record.entries[1].parent_inode}; }
+                action.affected_inodes = { inode };
+            } 
+
+
+            std::cout << action.timestamp << " " << action.action << " [";
+            for (size_t i = 0; i < action.args.size(); ++i) {
+                if (i) std::cout << " ";
+                std::cout << action.args[i];
+            }
+            std::cout << "] [";
+            for (size_t i = 0; i < action.affected_dirs.size(); ++i) {
+                if (i) std::cout << " ";
+                std::cout << action.affected_dirs[i];
+            }
+            std::cout << "] [";
+            for (size_t i = 0; i < action.affected_inodes.size(); ++i) {
+                if (i) std::cout << " ";
+                std::cout << action.affected_inodes[i];
+            }
+            std::cout << "]\n";
+        }
+    }
 };   
 
 int main(int argc, char* argv[]) {
     Ext2FileSystem fs(argv[1]);
     fs.displayDirectoryTree();
+    std::cout << "\n--- Recovered Actions ---\n";
+    fs.recovery();
     return 0;
 }
