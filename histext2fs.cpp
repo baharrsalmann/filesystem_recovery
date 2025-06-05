@@ -70,6 +70,7 @@ public:
         printRecoveredActions();
     }
 
+
 private:
     void readSuperBlock() {
         fs_file.seekg(EXT2_SUPER_BLOCK_POSITION);
@@ -272,9 +273,7 @@ private:
         std::set<uint32_t> active_inodes;
         vector<std::pair<std::string, uint32_t>> active_entries;
         vector<GhostEntry> all_ghosts;
-        
-        // Reset offset for actual processing
-        offset = 0;                                    
+                                          
         while (offset < block_size) {
             const ext2_dir_entry* entry = 
                 reinterpret_cast<const ext2_dir_entry*>(block_buffer.data() + offset);
@@ -312,7 +311,6 @@ private:
                         if (inode_to_info.find(ghost.inode) == inode_to_info.end()) {
                             inode_to_info[ghost.inode].inode_data = inode_data;
                         }
-                        //cout<<(parent_inode)<<"  "<<current_path;
                         inode_to_info[ghost.inode].entries.push_back({"/"+full_path, ghost.name, dir_inode, true});
                     }
                 }
@@ -328,7 +326,7 @@ private:
                 traverseDirectory(inode, depth, new_path, dir_name, parent_is_ghost);
             } else {
                 if (parent_is_ghost) {
-                    std::cout << indent << " (" << inode << ":" << name << ")\n";
+                    //std::cout << indent << " (" << inode << ":" << name << ")\n";
                 } else {
                     std::cout << indent << " " << inode << ":" << name << "\n";
                 }
@@ -345,22 +343,17 @@ private:
             }
         }
     }
-        const auto& getInodeEntryMap() const { return inode_to_info; }
+    const auto& getInodeEntryMap() const { return inode_to_info; }
 
-    void printRecoveredActions() const {
+    void printRecoveredActions() {
         for (const auto& [inode, record] : inode_to_info) {
             size_t live_count = 0, ghost_count = 0;
-            //string path = "";
-            //uint32_t parent = 0;
             for (const auto& e : record.entries) {
                 if (e.is_ghost) ghost_count++;
                 else {
                     live_count++;
-                    //path = e.full_path;
-                    //parent = e.parent_inode;
                 }
             }
-
             const auto& inode_data = record.inode_data;
             Action action;
             if (ghost_count == 0) {
@@ -378,32 +371,130 @@ private:
                 else  {action.args = {record.entries[1].full_path}; action.affected_dirs={record.entries[1].parent_inode}; }
                 action.affected_inodes = { inode };
             } 
+            else{
+                int potential_flag=0; bool found=false;
+                EntryRecord potential;
+                for (const auto& e : record.entries) {
+                    if(e.is_ghost && readInode(e.parent_inode).modification_time == inode_data.access_time){found=true; potential=e; break;}
+                    else if (e.is_ghost && readInode(e.parent_inode).access_time < inode_data.access_time){ 
+                        potential_flag++; 
+                        potential=e;}
+                }
+                if(found || potential_flag==1) {action.args={potential.full_path}; action.affected_dirs={potential.parent_inode};}
+                else{action.args = {""};
+                action.affected_dirs = {0};}
+                action.timestamp = inode_data.access_time;
+                action.action = (inode_data.mode & EXT2_I_DTYPE) ? "mkdir" : "touch";
+                action.affected_inodes = { inode };
+            }
+            printAction(action);
+
+            if(inode_data.deletion_time!=0){
+                Action action;
+                if(ghost_count==1){
+                    action.timestamp=inode_data.deletion_time;
+                    action.action=(inode_data.mode & EXT2_I_DTYPE) ? "rmdir" : "rm";
+                    action.affected_inodes={inode};
+                    action.args = {record.entries[0].full_path };
+                    action.affected_dirs = { record.entries[0].parent_inode };
+                    printAction(action);
+                }
+                else{
+                    int potential_flag=0; bool found=false;
+                    EntryRecord potential;
+                    for (const auto& e : record.entries) {
+                        if(readInode(e.parent_inode).modification_time == inode_data.deletion_time){found=true; potential=e; break;}
+                        else if (readInode(e.parent_inode).modification_time > inode_data.deletion_time){ 
+                            potential_flag++; 
+                            potential=e;}
+                    }
+                    if(found || potential_flag==1) {action.args={potential.full_path}; action.affected_dirs={potential.parent_inode};}
+                    else{
+                        action.args = {""};
+                        action.affected_dirs = {0};
+                    }
+                    action.timestamp=inode_data.deletion_time;
+                    action.action=(inode_data.mode & EXT2_I_DTYPE) ? "rmdir" : "rm";
+                    action.affected_inodes={inode};
+                    printAction(action);
 
 
+                    //kalan ghostlar move idir.
+                    Action actmove;
+
+                }
+
+            }
+
+            else{ //deletion_time==0
+                Action action;
+                if(ghost_count==1){
+                    action.timestamp=inode_data.change_time;
+                    action.action="mv";
+                    action.affected_inodes={inode};
+                    action.args = {record.entries[0].full_path };
+                    action.affected_dirs = { record.entries[0].parent_inode };
+                    printAction(action);
+                }
+            }
+            
+
+
+
+        }
+    }
+        void printAction(Action action) const{
             std::cout << action.timestamp << " " << action.action << " [";
             for (size_t i = 0; i < action.args.size(); ++i) {
                 if (i) std::cout << " ";
-                std::cout << action.args[i];
+                if(action.args[i]=="") cout<<"?";
+                else cout << action.args[i];
             }
             std::cout << "] [";
             for (size_t i = 0; i < action.affected_dirs.size(); ++i) {
                 if (i) std::cout << " ";
-                std::cout << action.affected_dirs[i];
+                if(action.affected_dirs[i]==0) cout<<"?";
+                else std::cout << action.affected_dirs[i];
             }
             std::cout << "] [";
             for (size_t i = 0; i < action.affected_inodes.size(); ++i) {
                 if (i) std::cout << " ";
-                std::cout << action.affected_inodes[i];
+                if(action.affected_inodes[i]==0) cout<<"?";
+                else std::cout << action.affected_inodes[i];
             }
             std::cout << "]\n";
-        }
     }
+
+
+
 };   
 
+
+
 int main(int argc, char* argv[]) {
-    Ext2FileSystem fs(argv[1]);
+    if (argc != 4) {
+        std::cerr << "Usage: ./histext2fs <image> <state_output> <history_output>\n";
+        return 1;
+    }
+
+    const string image_path = argv[1];
+    const string state_output = argv[2];
+    const string history_output = argv[3];
+
+    Ext2FileSystem fs(image_path);
+
+    // Redirect state output
+    std::ofstream state_out(state_output);
+    std::streambuf* coutbuf = std::cout.rdbuf(); // backup
+    std::cout.rdbuf(state_out.rdbuf());
     fs.displayDirectoryTree();
-    std::cout << "\n--- Recovered Actions ---\n";
+    std::cout.rdbuf(coutbuf); // restore
+
+    // Redirect history output
+    std::ofstream history_out(history_output);
+    std::cout.rdbuf(history_out.rdbuf());
     fs.recovery();
+    std::cout.rdbuf(coutbuf); // restore again
+
     return 0;
 }
