@@ -218,14 +218,13 @@ private:
                 auto block_buffer = readBlock(inode.direct_blocks[i]);
                 processDirectoryBlockWithGhosts(block_buffer, depth + 1, current_path,inode_num, is_ghost);
             } catch (const std::exception& e) {
-                std::cerr << "Error reading directory block: " << e.what() << "\n";
+                //std::cerr << "Error reading directory block: " << e.what() << "\n";
                 continue;
             }
         }
         
         if (inode.single_indirect != 0) {
             try {
-                cout<<"single ind"<<endl;
                 auto indirect_block = readBlock(inode.single_indirect);
                 uint32_t* block_pointers = reinterpret_cast<uint32_t*>(indirect_block.data());
                 uint32_t pointers_per_block = block_size / sizeof(uint32_t);
@@ -235,16 +234,55 @@ private:
                     processDirectoryBlockWithGhosts(block_buffer, depth + 1, current_path,inode_num, is_ghost);
                 }
             } catch (const std::exception& e) {
-                std::cerr << "Error reading indirect directory block: " << e.what() << "\n";
+                //std::cerr << "Error reading indirect directory block: " << e.what() << "\n";
             }
         }
-        
-        if(inode.double_indirect != 0){
-            cout<<"double ind"<<endl;
+
+        if (inode.double_indirect != 0) {
+            try {
+                auto double_block = readBlock(inode.double_indirect);
+                uint32_t* single_indirect_ptrs = reinterpret_cast<uint32_t*>(double_block.data());
+                uint32_t pointers_per_block = block_size / sizeof(uint32_t);
+
+                for (uint32_t i = 0; i < pointers_per_block && single_indirect_ptrs[i] != 0; i++) {
+                    auto indirect_block = readBlock(single_indirect_ptrs[i]);
+                    uint32_t* data_block_ptrs = reinterpret_cast<uint32_t*>(indirect_block.data());
+
+                    for (uint32_t j = 0; j < pointers_per_block && data_block_ptrs[j] != 0; j++) {
+                        auto block_buffer = readBlock(data_block_ptrs[j]);
+                        processDirectoryBlockWithGhosts(block_buffer, depth + 1, current_path,is_ghost);
+                    }
+                }
+            } catch (const std::exception& e) {
+                //std::cerr << "Error reading double indirect directory block: " << e.what() << "\n";
+            }
         }
-        if(inode.triple_indirect != 0){
-            cout<<"triple ind"<<endl;
+
+        if (inode.triple_indirect != 0) {
+            try {
+                auto triple_block = readBlock(inode.triple_indirect);
+                uint32_t* double_indirect_ptrs = reinterpret_cast<uint32_t*>(triple_block.data());
+                uint32_t pointers_per_block = block_size / sizeof(uint32_t);
+
+                for (uint32_t i = 0; i < pointers_per_block && double_indirect_ptrs[i] != 0; i++) {
+                    auto double_block = readBlock(double_indirect_ptrs[i]);
+                    uint32_t* single_indirect_ptrs = reinterpret_cast<uint32_t*>(double_block.data());
+
+                    for (uint32_t j = 0; j < pointers_per_block && single_indirect_ptrs[j] != 0; j++) {
+                        auto indirect_block = readBlock(single_indirect_ptrs[j]);
+                        uint32_t* data_block_ptrs = reinterpret_cast<uint32_t*>(indirect_block.data());
+
+                        for (uint32_t k = 0; k < pointers_per_block && data_block_ptrs[k] != 0; k++) {
+                            auto block_buffer = readBlock(data_block_ptrs[k]);
+                            processDirectoryBlockWithGhosts(block_buffer, depth + 1, current_path,is_ghost);
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                //std::cerr << "Error reading triple indirect directory block: " << e.what() << "\n";
+            }
         }
+
     }
     
     // Modified processDirectoryBlockWithGhosts to traverse ghost directories
@@ -335,7 +373,7 @@ private:
                     LiveEntry=e;
                 }
         }
-        if(live_count==0 && inode.inode_data.deletion_time==0) cout<<"COULDNT FIND LIVE ENTRY!!!"<<endl;
+        //if(live_count==0 && inode.inode_data.deletion_time==0) cout<<"COULDNT FIND LIVE ENTRY!!!"<<endl;
         //Caseler
         if(ghost_count==0 && live_count==1){  //kesin
             CreationEntry=LiveEntry;
@@ -392,7 +430,7 @@ private:
                     potential_flag++; 
                     potential=e;}
             }
-            if(potential_flag==1) {CreationEntry==potential; foundCreation=true; }
+            if(potential_flag==1) {CreationEntry=potential; foundCreation=true; }
         }
         else if(ghost_count==1 && live_count==0){ //kesin
             foundCreation=true; foundDeletion=true;
@@ -408,7 +446,7 @@ private:
                     potential_flag++; 
                     potential=e;}
             }
-            if(potential_flag==1) {CreationEntry==potential; foundCreation=true; }
+            if(potential_flag==1) {CreationEntry=potential; foundCreation=true; }
 
             //creation found then deletion is obvious.
             if(foundCreation){
@@ -444,7 +482,7 @@ private:
                     potential_flag_c++; 
                     potential_c=e;}
             }
-            if(potential_flag_c==1) {CreationEntry==potential_c; foundCreation=true; }
+            if(potential_flag_c==1) {CreationEntry=potential_c; foundCreation=true; }
             //deletion arama
             int potential_flag=0; EntryRecord potential;
             for (const auto& e : inode.entries) {
