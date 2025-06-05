@@ -9,6 +9,7 @@
 #include <set>
 #include "ext2fs.h"
 #include "ext2fs_print.h"
+#include <algorithm> //SORUN VAR MI?
 using namespace std;
 
 struct GhostEntry {
@@ -339,13 +340,15 @@ private:
                 string new_path = current_path.empty() ? ghost.name : current_path + "/" + ghost.name;
                 traverseDirectory(ghost.inode, depth, new_path, ghost.name, true);
             } else {
-                std::cout << indent << " (" << ghost.inode << ":" << ghost.name << ")\n";
+                if(!parent_is_ghost) cout << indent << " (" << ghost.inode << ":" << ghost.name << ")\n";
             }
         }
     }
     const auto& getInodeEntryMap() const { return inode_to_info; }
 
     void printRecoveredActions() {
+        vector<Action> actions;
+
         for (const auto& [inode, record] : inode_to_info) {
             size_t live_count = 0, ghost_count = 0;
             for (const auto& e : record.entries) {
@@ -387,7 +390,7 @@ private:
                 action.action = (inode_data.mode & EXT2_I_DTYPE) ? "mkdir" : "touch";
                 action.affected_inodes = { inode };
             }
-            printAction(action);
+            actions.push_back(action);
 
             if(inode_data.deletion_time!=0){
                 Action action;
@@ -397,7 +400,7 @@ private:
                     action.affected_inodes={inode};
                     action.args = {record.entries[0].full_path };
                     action.affected_dirs = { record.entries[0].parent_inode };
-                    printAction(action);
+                    actions.push_back(action);
                 }
                 else{
                     int potential_flag=0; bool found=false;
@@ -416,10 +419,10 @@ private:
                     action.timestamp=inode_data.deletion_time;
                     action.action=(inode_data.mode & EXT2_I_DTYPE) ? "rmdir" : "rm";
                     action.affected_inodes={inode};
-                    printAction(action);
+                    actions.push_back(action);
 
 
-                    //kalan ghostlar move idir.
+                    //kalan ghostlar move idir. if found||potmove==1 e dışındaki entrylere mv bastır ? ile.
                     Action actmove;
 
                 }
@@ -432,19 +435,61 @@ private:
                     action.timestamp=inode_data.change_time;
                     action.action="mv";
                     action.affected_inodes={inode};
-                    action.args = {record.entries[0].full_path };
-                    action.affected_dirs = { record.entries[0].parent_inode };
-                    printAction(action);
+                    action.affected_dirs = { record.entries[0].parent_inode , record.entries[1].parent_inode};
+                    if(record.entries[0].is_ghost){ 
+                        action.args = {record.entries[0].full_path, record.entries[1].full_path};
+                        }
+                    else{
+                        action.args = {record.entries[1].full_path, record.entries[0].full_path};
+                        }
+
+                    actions.push_back(action);
                 }
+                else{
+                    EntryRecord liveEntry;
+                    for (const auto& e : record.entries) {
+                        if(!e.is_ghost) {liveEntry=e; break;}
+                    }
+                    Action actmove;
+                    actmove.action="mv";
+                    actmove.affected_inodes={inode};
+                    //BURAYA OLUSTUGUN YER DEĞİLSE DİĞERİNİ TIMESTAMPLEE!!!
+                    for (const auto& e : record.entries) {
+                        if(!e.is_ghost) continue;
+                        if(readInode(e.parent_inode).modification_time==readInode(liveEntry.parent_inode).modification_time 
+                            || readInode(e.parent_inode).modification_time==inode_data.change_time){
+                            
+                            actmove.affected_dirs={e.parent_inode,liveEntry.parent_inode};
+                            actmove.args={e.full_path,liveEntry.full_path};
+                            actmove.timestamp=readInode(e.parent_inode).modification_time;
+                            }
+                        else{
+                        actmove.affected_dirs={e.parent_inode};
+                        actmove.args={e.full_path, "?"}; 
+                        actmove.timestamp=0;
+                        }
+                        actions.push_back(actmove);
+                    }
+                    
+                }
+
+                
             }
             
+        }
 
+        std::sort(actions.begin(), actions.end(), [](const Action& a, const Action& b) {
+            return a.timestamp < b.timestamp;
+        });
 
-
+    
+        for (const auto& act : actions) {
+            printAction(act);
         }
     }
         void printAction(Action action) const{
-            std::cout << action.timestamp << " " << action.action << " [";
+            if(action.timestamp==0){cout << "? " <<  action.action << " [";}
+            else cout << action.timestamp << " " << action.action << " [";
             for (size_t i = 0; i < action.args.size(); ++i) {
                 if (i) std::cout << " ";
                 if(action.args[i]=="") cout<<"?";
