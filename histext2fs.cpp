@@ -23,6 +23,13 @@ struct EntryRecord {
     string name;
     uint32_t parent_inode;
     bool is_ghost;
+    // Equality operator overload
+    bool operator==(const EntryRecord& other) const {
+        return full_path == other.full_path &&
+               name == other.name &&
+               parent_inode == other.parent_inode &&
+               is_ghost == other.is_ghost;
+    }
 };
 
 struct InodeRecord {
@@ -358,9 +365,12 @@ private:
                 }
             }
             const auto& inode_data = record.inode_data;
+            EntryRecord createdIn; bool foundCreatedIn=false;
             Action action;
             if (ghost_count == 0) {
                 // mkdir or touch
+                createdIn = record.entries[0];
+                foundCreatedIn=true;
                 action.timestamp = inode_data.access_time;
                 action.action = (inode_data.mode & EXT2_I_DTYPE) ? "mkdir" : "touch";
                 action.args = {record.entries[0].full_path };
@@ -370,8 +380,8 @@ private:
                 // mkdir or touch
                 action.timestamp = inode_data.access_time;
                 action.action = (inode_data.mode & EXT2_I_DTYPE) ? "mkdir" : "touch";
-                if(record.entries[0].is_ghost) {action.args = {record.entries[0].full_path}; action.affected_dirs={record.entries[0].parent_inode}; }
-                else  {action.args = {record.entries[1].full_path}; action.affected_dirs={record.entries[1].parent_inode}; }
+                if(record.entries[0].is_ghost) {action.args = {record.entries[0].full_path}; action.affected_dirs={record.entries[0].parent_inode}; createdIn=record.entries[0]; foundCreatedIn=true; }
+                else  {action.args = {record.entries[1].full_path}; action.affected_dirs={record.entries[1].parent_inode}; createdIn=record.entries[1]; foundCreatedIn=true; }
                 action.affected_inodes = { inode };
             } 
             else{
@@ -383,7 +393,7 @@ private:
                         potential_flag++; 
                         potential=e;}
                 }
-                if(found || potential_flag==1) {action.args={potential.full_path}; action.affected_dirs={potential.parent_inode};}
+                if(found || potential_flag==1) {createdIn=potential; foundCreatedIn=true; action.args={potential.full_path}; action.affected_dirs={potential.parent_inode};}
                 else{action.args = {""};
                 action.affected_dirs = {0};}
                 action.timestamp = inode_data.access_time;
@@ -391,6 +401,8 @@ private:
                 action.affected_inodes = { inode };
             }
             actions.push_back(action);
+
+            if(ghost_count==0) continue;
 
             if(inode_data.deletion_time!=0){
                 Action action;
@@ -429,36 +441,52 @@ private:
 
             }
 
-            else{ //deletion_time==0
-                Action action;
+            else{ //deletion_time==0  // 1ghost-1live, 3 ghost-1live gibi. çünkü sadece liveleri continueladın. 
+                EntryRecord liveEntry;
+                for (const auto& e : record.entries) {
+                    if(!e.is_ghost) {liveEntry=e; break;}
+                }
+                Action actmove;
+                actmove.action="mv";
+                actmove.affected_inodes={inode};
+
                 if(ghost_count==1){
-                    action.timestamp=inode_data.change_time;
-                    action.action="mv";
-                    action.affected_inodes={inode};
-                    action.affected_dirs = { record.entries[0].parent_inode , record.entries[1].parent_inode};
+                    actmove.timestamp=inode_data.change_time;  
+                    actmove.affected_dirs = { record.entries[0].parent_inode , record.entries[1].parent_inode};
                     if(record.entries[0].is_ghost){ 
-                        action.args = {record.entries[0].full_path, record.entries[1].full_path};
+                        actmove.args = {record.entries[0].full_path, record.entries[1].full_path};
                         }
                     else{
-                        action.args = {record.entries[1].full_path, record.entries[0].full_path};
+                        actmove.args = {record.entries[1].full_path, record.entries[0].full_path};
                         }
 
-                    actions.push_back(action);
+                    actions.push_back(actmove);
+                }
+                else if(ghost_count==2 && foundCreatedIn){
+                    EntryRecord otherGhost;
+                    for (const auto& e : record.entries) {
+                        if(e.is_ghost && !(e==createdIn)){otherGhost=e; break;}
+                    }
+                    actmove.affected_dirs={createdIn.parent_inode, otherGhost.parent_inode};
+                    actmove.timestamp=0;
+                    actmove.args={createdIn.full_path,otherGhost.full_path};
+                    actions.push_back(actmove);
+
+                    actmove.affected_dirs={otherGhost.parent_inode,liveEntry.parent_inode};
+                    actmove.args={otherGhost.full_path,liveEntry.full_path};
+                    if(readInode(otherGhost.parent_inode).modification_time==readInode(liveEntry.parent_inode).modification_time 
+                            || readInode(otherGhost.parent_inode).modification_time==inode_data.change_time)
+                        actmove.timestamp={readInode(otherGhost.parent_inode).modification_time};
+                    else if(inode_data.change_time!=inode_data.modification_time) {
+                        actmove.timestamp=inode_data.change_time;}
+                    actions.push_back(actmove);
                 }
                 else{
-                    EntryRecord liveEntry;
-                    for (const auto& e : record.entries) {
-                        if(!e.is_ghost) {liveEntry=e; break;}
-                    }
-                    Action actmove;
-                    actmove.action="mv";
-                    actmove.affected_inodes={inode};
                     //BURAYA OLUSTUGUN YER DEĞİLSE DİĞERİNİ TIMESTAMPLEE!!!
                     for (const auto& e : record.entries) {
                         if(!e.is_ghost) continue;
                         if(readInode(e.parent_inode).modification_time==readInode(liveEntry.parent_inode).modification_time 
                             || readInode(e.parent_inode).modification_time==inode_data.change_time){
-                            
                             actmove.affected_dirs={e.parent_inode,liveEntry.parent_inode};
                             actmove.args={e.full_path,liveEntry.full_path};
                             actmove.timestamp=readInode(e.parent_inode).modification_time;
