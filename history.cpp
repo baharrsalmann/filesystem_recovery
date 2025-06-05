@@ -9,7 +9,7 @@
 #include <set>
 #include "ext2fs.h"
 #include "ext2fs_print.h"
-#include <algorithm> //SORUN VAR MI?
+#include <algorithm>
 using namespace std;
 
 struct GhostEntry {
@@ -128,21 +128,20 @@ private:
             return inode;
         }
         
-        // Calculate which block group contains this inode
+        // which block group contains this inode
         uint32_t group = (inode_num - 1) / super_block.inodes_per_group;
         uint32_t index = (inode_num - 1) % super_block.inodes_per_group;
         
         if (group >= num_block_groups) {
             throw std::runtime_error("Invalid inode group: " + std::to_string(group));
         }
-        
-        // Calculate the block and offset within the inode table
+
         uint32_t inode_table_block = bgd_table[group].inode_table;
         uint32_t inodes_per_block = block_size / super_block.inode_size;
         uint32_t block_offset = index / inodes_per_block;
         uint32_t inode_offset = (index % inodes_per_block) * super_block.inode_size;
         
-        // Read the block containing the inode
+        // read the inode's block
         auto block_buffer = readBlock(inode_table_block + block_offset);
         std::memcpy(&inode, block_buffer.data() + inode_offset, sizeof(ext2_inode));
         
@@ -155,7 +154,6 @@ private:
         return result; 
     }
     
-    // Function to find ghost entries in the unused space after a directory entry
     vector<GhostEntry> findGhostEntries(const std::vector<char>& block_buffer, 
                                            uint32_t start_offset, uint32_t available_space) {
         vector<GhostEntry> ghosts;
@@ -179,7 +177,6 @@ private:
             ghost.name = std::string(potential_entry->name, potential_entry->name_length);
             ghost.file_type = potential_entry->file_type;
                 
-            // Skip . and .. entries
             if (ghost.name != "." && ghost.name != "..") {
                 ghosts.push_back(ghost);
             }
@@ -285,7 +282,6 @@ private:
 
     }
     
-    // Modified processDirectoryBlockWithGhosts to traverse ghost directories
     void processDirectoryBlockWithGhosts(const std::vector<char>& block_buffer, int depth, 
                                         const std::string& current_path,uint32_t dir_inode, bool parent_is_ghost = false) {
         uint32_t offset = 0;
@@ -548,7 +544,7 @@ private:
                 actmove.affected_dirs={info.CreationEntry.parent_inode, info.DeletionEntry.parent_inode};
                 actions.push_back(actmove); 
             }
-            else if(info.ghost_count>1 && !info.foundCreation){
+            else if(info.ghost_count>1){
                 //ghost sayısı kadar dön, sadece nereden cıktıklarının movelarını yazabilirsin, deletion entryi pass geç.
                 if(info.foundDeletion){
                     actmove.args={"?",info.DeletionEntry.full_path};
@@ -564,7 +560,7 @@ private:
                     }
                 }
                 else{
-                    for (const auto& e : record.entries) { //burada fazladan bir move bastırma olasılığın cok yüksek.
+                    for (const auto& e : record.entries) { //burada fazladan bir move bastırma olasılığın cok yüksek. tradeoff.
                         if(e.is_ghost && readInode(e.parent_inode).modification_time!=inode_data.deletion_time){
                             actmove.args={e.full_path,"?"};
                             actmove.affected_dirs={e.parent_inode,0};
@@ -636,11 +632,8 @@ private:
                         actions.push_back(actmove);
                     }
                     
-                }
-
-                
+                }       
             }
-            
         }
     
         std::sort(actions.begin(), actions.end(), [](const Action& a, const Action& b) {
